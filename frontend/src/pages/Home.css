@@ -1,0 +1,238 @@
+.home-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+  padding: 40px 20px;
+}
+
+.grid-bg {
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 48px 48px;
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+.home-inner {
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  position: relative;
+  z-index: 1;
+}
+
+.home-header {
+  text-align: center;
+}
+
+.logo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 99px;
+  padding: 6px 16px 6px 10px;
+  margin-bottom: 16px;
+}
+
+.logo-icon {
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.logo-text {
+  font-family: 'Syne', sans-serif;
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.home-tagline {
+  font-family: 'Syne', sans-serif;
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.home-tagline em {
+  color: var(--accent);
+  font-style: normal;
+}
+
+/* Upload Card */
+.upload-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 6px;
+  overflow: hidden;
+}
+
+.drop-zone {
+  border: 2px dashed var(--border2);
+  border-radius: 14px;
+  padding: 52px 32px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  text-align: center;
+}
+
+.drop-zone:hover {
+  border-color: var(--accent);
+  background: rgba(110, 231, 183, 0.04);
+}
+
+.drop-zone.dragging {
+  border-color: var(--accent);
+  background: rgba(110, 231, 183, 0.08);
+  transform: scale(1.01);
+}
+
+.drop-zone.loading-state {
+  cursor: default;
+  pointer-events: none;
+}
+
+.upload-idle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-icon-wrap {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  margin-bottom: 8px;
+  transition: all 0.2s ease;
+}
+
+.drop-zone:hover .upload-icon-wrap {
+  background: rgba(110, 231, 183, 0.1);
+  border-color: var(--accent);
+}
+
+.upload-main {
+  font-family: 'Syne', sans-serif;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.upload-sub {
+  font-size: 13px;
+  color: var(--text3);
+}
+
+.upload-formats {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.fmt-tag {
+  font-family: 'DM Mono', monospace;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+
+/* Loading */
+.upload-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.upload-loading-text {
+  font-family: 'Syne', sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.upload-loading-text .font-mono {
+  color: var(--accent);
+}
+
+/* Error */
+.error-banner {
+  margin: 8px 4px 4px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--danger);
+  font-size: 13px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Features */
+.features {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.feature-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.feature-icon {
+  font-size: 20px;
+  color: var(--accent2);
+  flex-shrink: 0;
+}
+
+.feature-label {
+  font-family: 'Syne', sans-serif;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.feature-desc {
+  font-size: 12px;
+  color: var(--text3);
+  margin-top: 1px;
+}

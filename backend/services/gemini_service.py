@@ -1,13 +1,52 @@
 import google.generativeai as genai
 import json
 import re
+import itertools
+import os
 from config import GEMINI_API_KEY
 from typing import Dict, Any, List
  
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+# ── API Key Rotation Setup ───────────────────────────────────────────────────
+API_KEYS = [k for k in [
+    os.getenv("GEMINI_KEY_1"),
+    os.getenv("GEMINI_KEY_2"),
+    os.getenv("GEMINI_KEY_3"),
+    os.getenv("GEMINI_KEY_4"),
+] if k]  # None values filter ho jayenge
+ 
+key_cycle = itertools.cycle(API_KEYS)
+current_key = next(key_cycle)
  
  
+def get_model():
+    genai.configure(api_key=current_key)
+    return genai.GenerativeModel("gemini-2.5-flash")
+ 
+ 
+def generate_with_fallback(prompt: str) -> str:
+    global current_key
+    tried = 0
+    last_error = None
+ 
+    while tried < len(API_KEYS):
+        try:
+            model = get_model()
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+                print(f"[Key Rotation] Key {tried + 1} exhausted, switching to next...")
+                current_key = next(key_cycle)
+                tried += 1
+                last_error = e
+            else:
+                raise e
+ 
+    raise Exception(f"All {len(API_KEYS)} API keys exhausted. Last error: {last_error}")
+ 
+ 
+# ── Question Generation ──────────────────────────────────────────────────────
 def generate_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
     try:
         prompt = f"""
@@ -45,18 +84,44 @@ Rules:
 - Include text casing standardization if text columns exist
 - Make questions specific, mentioning actual column names and counts
 - options must always have at least 2 choices
-- option values must be simple lowercase keywords like: remove_duplicates, fill_mean, fill_median, fill_unknown, drop_rows, yyyy-mm-dd, dd/mm/yyyy, title_case, upper_case, lower_case, remove_outliers, cap_outliers, keep
+- option values must be simple lowercase keywords like: remove_duplicates, fill_mean, fill_median, fill_unknown, fill_mode, drop_rows, yyyy-mm-dd, dd/mm/yyyy, title_case, upper_case, lower_case, remove_outliers, cap_outliers, keep
 """
-        response = model.generate_content(prompt)
-        text = response.text.strip()
+        text = generate_with_fallback(prompt)
         text = re.sub(r"```json|```", "", text).strip()
         questions = json.loads(text)
         return questions
     except Exception as e:
-        print(f"Gemini question generation failed: {e}")
+        print(f"[Gemini] Question generation failed: {e}")
         return get_fallback_questions(analysis)
  
  
+# ── Summary Generation ───────────────────────────────────────────────────────
+def generate_summary(stats: Dict[str, Any]) -> str:
+    try:
+        prompt = f"""
+You are a data analyst. Write a short, clear, friendly summary (3-5 sentences) of what was done to clean this data.
+Stats: {json.dumps(stats)}
+Be specific about numbers. Mention what was removed, fixed, or kept. End with a positive note.
+Return only the summary text, no markdown.
+"""
+        return generate_with_fallback(prompt)
+    except Exception as e:
+        print(f"[Gemini] Summary generation failed: {e}")
+        rows_removed = stats.get('rows_removed', 0)
+        duplicates = stats.get('duplicates_removed', 0)
+        missing = stats.get('missing_handled', {})
+        cleaned = stats.get('columns_cleaned', [])
+        return (
+            f"Data cleaning complete! Started with {stats.get('original_rows')} rows, "
+            f"ended with {stats.get('final_rows')} rows. "
+            f"Removed {duplicates} duplicate row(s). "
+            f"Handled missing values in {len(missing)} column(s). "
+            f"{'Cleaned formatting in ' + str(len(cleaned)) + ' column(s). ' if cleaned else ''}"
+            f"Your file is ready to download."
+        )
+ 
+ 
+# ── Fallback Questions (no Gemini needed) ────────────────────────────────────
 def get_fallback_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
     questions = []
  
@@ -72,15 +137,8 @@ def get_fallback_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
             ]
         })
  
-    has_missing_text = False
-    has_missing_numeric = False
- 
-    for col in analysis["columns"]:
-        if col["missing_count"] > 0:
-            if col["type_category"] == "numeric":
-                has_missing_numeric = True
-            else:
-                has_missing_text = True
+    has_missing_text = any(c["missing_count"] > 0 and c["type_category"] == "text" for c in analysis["columns"])
+    has_missing_numeric = any(c["missing_count"] > 0 and c["type_category"] == "numeric" for c in analysis["columns"])
  
     if has_missing_numeric:
         questions.append({
@@ -110,7 +168,6 @@ def get_fallback_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
             ]
         })
  
-    # Date columns
     date_cols = [c for c in analysis["columns"] if c["type_category"] == "date"]
     if date_cols:
         questions.append({
@@ -125,7 +182,6 @@ def get_fallback_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
             ]
         })
  
-    # Text casing
     text_cols = [c for c in analysis["columns"] if c["type_category"] == "text"]
     if text_cols:
         questions.append({
@@ -142,29 +198,3 @@ def get_fallback_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
  
     return questions
- 
- 
-def generate_summary(stats: Dict[str, Any]) -> str:
-    try:
-        prompt = f"""
-You are a data analyst. Write a short, clear, friendly summary (3-5 sentences) of what was done to clean this data.
-Stats: {json.dumps(stats)}
-Be specific about numbers. Mention what was removed, fixed, or kept. End with a positive note.
-Return only the summary text, no markdown.
-"""
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"Gemini summary generation failed: {e}")
-        rows_removed = stats.get('rows_removed', 0)
-        duplicates = stats.get('duplicates_removed', 0)
-        missing = stats.get('missing_handled', {})
-        cleaned = stats.get('columns_cleaned', [])
-        return (
-            f"Data cleaning complete! Started with {stats.get('original_rows')} rows, "
-            f"ended with {stats.get('final_rows')} rows. "
-            f"Removed {duplicates} duplicate row(s). "
-            f"Handled missing values in {len(missing)} column(s). "
-            f"{'Cleaned formatting in ' + str(len(cleaned)) + ' column(s). ' if cleaned else ''}"
-            f"Your file is ready to download."
-        )

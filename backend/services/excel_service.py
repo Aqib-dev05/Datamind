@@ -7,9 +7,7 @@ NA_STRINGS = {'n/a', 'na', 'none', 'null', '-', '', 'not available', 'no expiry'
  
 # ── Dtype Helpers (Pandas 3.0 compatible) ────────────────────────────────────
 def is_string_col(series: pd.Series) -> bool:
-    """Works for both old object dtype and new pandas 3.0 str dtype."""
     return pd.api.types.is_string_dtype(series) or series.dtype == object
- 
  
 def is_numeric_col(series: pd.Series) -> bool:
     return pd.api.types.is_numeric_dtype(series)
@@ -22,13 +20,10 @@ def parse_date_smart(val):
     val = val.strip()
     if val.lower() in NA_STRINGS:
         return pd.NaT
- 
     formats = [
-        "%Y-%m-%d",   "%d/%m/%Y",   "%d-%m-%Y",
-        "%m/%d/%Y",   "%Y/%m/%d",   "%d.%m.%Y",
-        "%Y.%m.%d",   "%d %b %Y",   "%b %d, %Y",
-        "%B %d, %Y",  "%d %B %Y",   "%b %d %Y",
-        "%B %d %Y",   "%d-%b-%Y",   "%Y-%b-%d",
+        "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d",
+        "%d.%m.%Y", "%Y.%m.%d", "%d %b %Y", "%b %d, %Y", "%B %d, %Y",
+        "%d %B %Y", "%b %d %Y", "%B %d %Y", "%d-%b-%Y", "%Y-%b-%d",
     ]
     for fmt in formats:
         try:
@@ -67,13 +62,29 @@ def standardize_date_column(series: pd.Series, target_format: str) -> pd.Series:
     return series.apply(convert)
  
  
-# ── Keyword Matching ──────────────────────────────────────────────────────────
 def matches(v: str, keywords: list) -> bool:
     return any(k in v for k in keywords)
  
  
+def find_column(question_id: str, column_hint: str, df: pd.DataFrame):
+    """Find actual column in df matching the hint from Gemini."""
+    if column_hint:
+        # Exact match first
+        if column_hint in df.columns:
+            return column_hint
+        # Case-insensitive match
+        for c in df.columns:
+            if c.lower() == column_hint.lower():
+                return c
+        # Partial match
+        for c in df.columns:
+            if column_hint.lower() in c.lower() or c.lower() in column_hint.lower():
+                return c
+    return None
+ 
+ 
 # ── Main Processing ───────────────────────────────────────────────────────────
-def process_dataframe(df: pd.DataFrame, answers: Dict[str, Any]) -> tuple[pd.DataFrame, Dict[str, Any]]:
+def process_dataframe(df: pd.DataFrame, answers: Dict[str, Any], questions: list = None) -> tuple[pd.DataFrame, Dict[str, Any]]:
     stats = {
         "original_rows": len(df),
         "original_columns": len(df.columns),
@@ -85,8 +96,19 @@ def process_dataframe(df: pd.DataFrame, answers: Dict[str, Any]) -> tuple[pd.Dat
  
     df = df.copy()
  
+    # Build question_id → column map from questions list
+    q_column_map = {}
+    if questions:
+        for q in questions:
+            if q.get("column"):
+                q_column_map[q["id"]] = q["column"]
+ 
     for question_id, answer in answers.items():
         values = answer if isinstance(answer, list) else [answer]
+ 
+        # Get column hint for this question
+        column_hint = q_column_map.get(question_id)
+        target_col = find_column(question_id, column_hint, df) if column_hint else None
  
         for val in values:
             if not isinstance(val, str):
@@ -94,76 +116,77 @@ def process_dataframe(df: pd.DataFrame, answers: Dict[str, Any]) -> tuple[pd.Dat
             v = val.lower().strip()
  
             # ── DUPLICATES ────────────────────────────────────────────
-            if matches(v, ["remove_duplicates", "remove duplicate", "remove all dup", "drop dup"]) or \
-               (matches(v, ["remove", "drop"]) and "dup" in question_id.lower()):
+            if v == "remove_duplicates" or matches(v, ["remove_duplicates", "remove duplicate", "remove all dup"]):
                 before = len(df)
                 df = df.drop_duplicates()
                 stats["duplicates_removed"] = before - len(df)
  
+            # ── KEEP (skip) ───────────────────────────────────────────
+            elif v == "keep":
+                pass
+ 
             # ── MISSING: median ───────────────────────────────────────
-            elif matches(v, ["median value", "fill with the median", "fill with median", "fill_median", "impute median"]):
-                for c in get_numeric_cols_with_missing(df):
-                    df[c] = df[c].fillna(df[c].median())
-                    stats["missing_handled"][c] = "filled with median"
+            elif v == "fill_median" or matches(v, ["fill_median", "median value", "fill with median", "fill with the median"]):
+                cols = [target_col] if target_col and is_numeric_col(df[target_col]) else get_numeric_cols_with_missing(df)
+                for c in cols:
+                    if df[c].isnull().any():
+                        df[c] = df[c].fillna(df[c].median())
+                        stats["missing_handled"][c] = "filled with median"
  
             # ── MISSING: mean ─────────────────────────────────────────
-            elif matches(v, ["mean value", "fill with the mean", "fill with mean", "fill_mean", "impute mean"]):
-                for c in get_numeric_cols_with_missing(df):
-                    df[c] = df[c].fillna(df[c].mean())
-                    stats["missing_handled"][c] = "filled with mean"
+            elif v == "fill_mean" or matches(v, ["fill_mean", "mean value", "fill with mean", "fill with the mean"]):
+                cols = [target_col] if target_col and is_numeric_col(df[target_col]) else get_numeric_cols_with_missing(df)
+                for c in cols:
+                    if df[c].isnull().any():
+                        df[c] = df[c].fillna(df[c].mean())
+                        stats["missing_handled"][c] = "filled with mean"
  
             # ── MISSING: mode ─────────────────────────────────────────
-            elif matches(v, ["fill_mode", "most frequent", "mode value"]):
-                for c in df.columns:
-                    if is_string_col(df[c]) and df[c].isnull().any():
+            elif v == "fill_mode" or matches(v, ["fill_mode", "most frequent"]):
+                cols = [target_col] if target_col else [c for c in df.columns if is_string_col(df[c]) and df[c].isnull().any()]
+                for c in cols:
+                    if df[c].isnull().any():
                         mode_val = df[c].mode()
                         df[c] = df[c].fillna(mode_val[0] if len(mode_val) > 0 else "Unknown")
                         stats["missing_handled"][c] = "filled with mode"
  
-            # ── MISSING: placeholder (No Expiry / 9999) ───────────────
-            elif matches(v, ["9999-12-31", "no expiry", "fill with a placeholder", "placeholder", "far future date", "implies no"]):
-             for c in df.columns:
-                  if is_string_col(df[c]) and df[c].isnull().any() and is_date_column_smart(df[c]):
-                     df[c] = df[c].fillna("No Expiry")
-                     stats["missing_handled"][c] = "filled with No Expiry"
- 
             # ── MISSING: Unknown ──────────────────────────────────────
-            elif matches(v, ["fill_unknown", "fill with 'unknown'", "'unknown'", "unknown"]) and \
-                 not matches(v, ["no expiry", "placeholder", "9999"]):
-                for c in df.columns:
+            elif v == "fill_unknown" or matches(v, ["fill_unknown", "fill with 'unknown'", "'unknown'"]):
+                cols = [target_col] if target_col else [c for c in df.columns if is_string_col(df[c]) and df[c].isnull().any()]
+                for c in cols:
                     if is_string_col(df[c]) and df[c].isnull().any():
                         df[c] = df[c].fillna("Unknown")
                         stats["missing_handled"][c] = "filled with Unknown"
  
+            # ── MISSING: placeholder / No Expiry ─────────────────────
+            elif matches(v, ["9999-12-31", "no expiry", "fill with a placeholder", "far future date", "implies no"]):
+                cols = [target_col] if target_col else [c for c in df.columns if is_string_col(df[c]) and is_date_column_smart(df[c]) and df[c].isnull().any()]
+                for c in cols:
+                    if df[c].isnull().any():
+                        df[c] = df[c].fillna("No Expiry")
+                        stats["missing_handled"][c] = "filled with No Expiry"
+ 
             # ── MISSING: fill 0 ───────────────────────────────────────
-            elif matches(v, ["fill_zero", "fill with 0", "fill with zero"]):
-                for c in get_numeric_cols_with_missing(df):
-                    df[c] = df[c].fillna(0)
-                    stats["missing_handled"][c] = "filled with 0"
+            elif v == "fill_zero" or matches(v, ["fill_zero", "fill with 0"]):
+                cols = [target_col] if target_col and is_numeric_col(df[target_col]) else get_numeric_cols_with_missing(df)
+                for c in cols:
+                    if df[c].isnull().any():
+                        df[c] = df[c].fillna(0)
+                        stats["missing_handled"][c] = "filled with 0"
  
             # ── MISSING: drop rows ────────────────────────────────────
-            elif matches(v, ["drop_rows", "remove rows", "remove the rows", "delete rows", "drop rows"]):
+            elif v == "drop_rows" or matches(v, ["drop_rows", "remove rows", "drop rows"]):
                 before = len(df)
-                df = df.dropna()
-                stats["missing_handled"]["all"] = f"dropped {before - len(df)} rows"
- 
-            # ── OUTLIERS: keep ────────────────────────────────────────
-            elif matches(v, ["keep outlier", "keep them", "keep as"]) and "outlier" in v:
-                pass
- 
-            # ── OUTLIERS: remove ──────────────────────────────────────
-            elif matches(v, ["remove_outliers", "remove outlier", "delete outlier"]):
-                for c in df.select_dtypes(include=[np.number]).columns:
-                    before = len(df)
-                    Q1 = df[c].quantile(0.25)
-                    Q3 = df[c].quantile(0.75)
-                    IQR = Q3 - Q1
-                    df = df[~((df[c] < Q1 - 1.5 * IQR) | (df[c] > Q3 + 1.5 * IQR))]
-                    stats["outliers_removed"] += before - len(df)
+                if target_col:
+                    df = df.dropna(subset=[target_col])
+                else:
+                    df = df.dropna()
+                stats["missing_handled"][target_col or "all"] = f"dropped {before - len(df)} rows"
  
             # ── OUTLIERS: cap ─────────────────────────────────────────
-            elif matches(v, ["cap outlier", "cap_outlier", "cap/floor", "nearest non-outlier", "cap to", "cap them", "iqr bounds", "iqr"]):
-                for c in df.select_dtypes(include=[np.number]).columns:
+            elif v == "cap_outliers" or matches(v, ["cap_outliers", "cap outlier", "nearest non-outlier", "iqr bounds", "cap/floor", "set to boundary", "boundary values"]):
+                cols = [target_col] if target_col and is_numeric_col(df[target_col]) else df.select_dtypes(include=[np.number]).columns.tolist()
+                for c in cols:
                     Q1 = df[c].quantile(0.25)
                     Q3 = df[c].quantile(0.75)
                     IQR = Q3 - Q1
@@ -172,43 +195,55 @@ def process_dataframe(df: pd.DataFrame, answers: Dict[str, Any]) -> tuple[pd.Dat
                     if not df[c].equals(before_col) and c not in stats["columns_cleaned"]:
                         stats["columns_cleaned"].append(c)
  
+            # ── OUTLIERS: remove ──────────────────────────────────────
+            elif v == "remove_outliers" or matches(v, ["remove_outliers", "remove outlier"]):
+                cols = [target_col] if target_col and is_numeric_col(df[target_col]) else df.select_dtypes(include=[np.number]).columns.tolist()
+                for c in cols:
+                    before = len(df)
+                    Q1 = df[c].quantile(0.25)
+                    Q3 = df[c].quantile(0.75)
+                    IQR = Q3 - Q1
+                    df = df[~((df[c] < Q1 - 1.5 * IQR) | (df[c] > Q3 + 1.5 * IQR))]
+                    stats["outliers_removed"] += before - len(df)
+ 
             # ── DATE: YYYY-MM-DD ──────────────────────────────────────
-            elif matches(v, ["yyyy-mm-dd", "yyyy/mm/dd"]) or \
-                 (matches(v, ["standardize"]) and matches(v, ["yyyy", "2024-01"])):
-                for c in df.columns:
-                    if is_date_column_smart(df[c]):
-                        df[c] = standardize_date_column(df[c], "%Y-%m-%d")
-                        if c not in stats["columns_cleaned"]:
-                            stats["columns_cleaned"].append(c)
+            elif v == "yyyy-mm-dd" or matches(v, ["yyyy-mm-dd", "yyyy/mm/dd"]):
+                cols = [target_col] if target_col and is_date_column_smart(df[target_col]) else [c for c in df.columns if is_date_column_smart(df[c])]
+                for c in cols:
+                    df[c] = standardize_date_column(df[c], "%Y-%m-%d")
+                    if c not in stats["columns_cleaned"]:
+                        stats["columns_cleaned"].append(c)
  
             # ── DATE: DD/MM/YYYY ──────────────────────────────────────
-            elif matches(v, ["dd/mm/yyyy", "dd-mm-yyyy", "10/01/2024", "10/01"]) or \
-                 (matches(v, ["standardize"]) and matches(v, ["dd/", "dd-", "/mm/"])):
-                for c in df.columns:
-                    if is_date_column_smart(df[c]):
-                        df[c] = standardize_date_column(df[c], "%d/%m/%Y")
-                        if c not in stats["columns_cleaned"]:
-                            stats["columns_cleaned"].append(c)
+            elif v == "dd/mm/yyyy" or matches(v, ["dd/mm/yyyy", "dd-mm-yyyy"]):
+                cols = [target_col] if target_col and is_date_column_smart(df[target_col]) else [c for c in df.columns if is_date_column_smart(df[c])]
+                for c in cols:
+                    df[c] = standardize_date_column(df[c], "%d/%m/%Y")
+                    if c not in stats["columns_cleaned"]:
+                        stats["columns_cleaned"].append(c)
  
             # ── CASING: Title Case ────────────────────────────────────
-            elif matches(v, ["title_case", "title case", "proper case"]):
-                for c in df.columns:
+            elif v == "title_case" or matches(v, ["title_case", "title case"]):
+                cols = [target_col] if target_col else [c for c in df.columns if is_string_col(df[c]) and not is_date_column_smart(df[c])]
+                for c in cols:
                     if is_string_col(df[c]) and not is_date_column_smart(df[c]):
                         df[c] = df[c].apply(lambda x: x.strip().title() if isinstance(x, str) else x)
                         if c not in stats["columns_cleaned"]:
                             stats["columns_cleaned"].append(c)
  
             # ── CASING: UPPER ─────────────────────────────────────────
-            elif matches(v, ["upper_case", "upper case", "uppercase", "to uppercase", "convert to uppercase"]):
-                for c in df.columns:
+            elif v == "upper_case" or matches(v, ["upper_case", "upper case", "uppercase"]):
+                cols = [target_col] if target_col else [c for c in df.columns if is_string_col(df[c]) and not is_date_column_smart(df[c])]
+                for c in cols:
                     if is_string_col(df[c]) and not is_date_column_smart(df[c]):
                         df[c] = df[c].apply(lambda x: x.strip().upper() if isinstance(x, str) else x)
                         if c not in stats["columns_cleaned"]:
                             stats["columns_cleaned"].append(c)
  
             # ── CASING: lower ─────────────────────────────────────────
-            elif matches(v, ["lower_case", "lower case", "lowercase", "to lowercase"]):
-                for c in df.columns:
+            elif v == "lower_case" or matches(v, ["lower_case", "lower case", "lowercase"]):
+                cols = [target_col] if target_col else [c for c in df.columns if is_string_col(df[c]) and not is_date_column_smart(df[c])]
+                for c in cols:
                     if is_string_col(df[c]) and not is_date_column_smart(df[c]):
                         df[c] = df[c].apply(lambda x: x.strip().lower() if isinstance(x, str) else x)
                         if c not in stats["columns_cleaned"]:

@@ -3,32 +3,36 @@ import json
 import re
 import itertools
 import os
-from config import GEMINI_API_KEY
 from typing import Dict, Any, List
  
-# ── API Key Rotation Setup ───────────────────────────────────────────────────
 API_KEYS = [k for k in [
     os.getenv("GEMINI_KEY_1"),
     os.getenv("GEMINI_KEY_2"),
     os.getenv("GEMINI_KEY_3"),
     os.getenv("GEMINI_KEY_4"),
-] if k]  # None values filter ho jayenge
+] if k]
  
-key_cycle = itertools.cycle(API_KEYS)
-current_key = next(key_cycle)
+MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+]
+ 
+COMBINATIONS = [(key, model) for key in API_KEYS for model in MODELS]
+combo_cycle = itertools.cycle(COMBINATIONS)
+current_combo = next(combo_cycle)
  
  
 def get_model():
-    genai.configure(api_key=current_key)
-    return genai.GenerativeModel("gemini-2.5-flash")
+    key, model_name = current_combo
+    genai.configure(api_key=key)
+    return genai.GenerativeModel(model_name)
  
  
 def generate_with_fallback(prompt: str) -> str:
-    global current_key
+    global current_combo
     tried = 0
     last_error = None
- 
-    while tried < len(API_KEYS):
+    while tried < len(COMBINATIONS):
         try:
             model = get_model()
             response = model.generate_content(prompt)
@@ -36,21 +40,21 @@ def generate_with_fallback(prompt: str) -> str:
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                print(f"[Key Rotation] Key {tried + 1} exhausted, switching to next...")
-                current_key = next(key_cycle)
+                current_combo = next(combo_cycle)
                 tried += 1
+                key, mdl = current_combo
+                print(f"[Rotation] Switched to model={mdl}, key=...{key[-6:]}")
                 last_error = e
             else:
                 raise e
- 
-    raise Exception(f"All {len(API_KEYS)} API keys exhausted. Last error: {last_error}")
+    raise Exception(f"All API key+model combinations exhausted. Last error: {last_error}")
  
  
 # ── Question Generation ──────────────────────────────────────────────────────
 def generate_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
     try:
         prompt = f"""
-You are a data analyst AI. Analyze this Excel/CSV file analysis and generate smart questions to ask the user before cleaning/processing.
+You are a data analyst AI. Analyze this Excel/CSV file and generate smart cleaning questions for the user.
  
 FILE ANALYSIS:
 - Total Rows: {analysis['total_rows']}
@@ -59,15 +63,22 @@ FILE ANALYSIS:
 - Total Missing Values: {analysis['total_missing']}
 - Columns: {json.dumps(analysis['columns'], indent=2)}
  
-Generate 4-8 relevant questions based on what you find in the data. Each question should be actionable.
+STRICT RULES FOR QUESTION GENERATION:
+1. For DUPLICATES: one question if duplicate_rows > 0
+2. For MISSING VALUES: one question per column that has missing values (mention exact column name and count)
+3. For OUTLIERS: one question per numeric column that has outliers (mention exact column name)
+4. For DATE FORMAT: one question per date column (mention exact column name)
+5. For TEXT CASING: one question PER TEXT COLUMN separately - do NOT group columns together. Each text column gets its own casing question.
+6. Do NOT combine multiple columns into one question
+7. Generate maximum 12 questions total
  
-Return ONLY a JSON array with this exact structure (no markdown, no explanation):
+Return ONLY a JSON array (no markdown, no explanation):
 [
   {{
     "id": "q1",
-    "question": "Question text here",
+    "question": "Question text mentioning the specific column name",
     "type": "radio",
-    "column": "column_name or null",
+    "column": "exact_column_name",
     "options": [
       {{"id": "o1", "label": "Option label", "value": "option_value"}},
       {{"id": "o2", "label": "Option label", "value": "option_value"}}
@@ -75,16 +86,11 @@ Return ONLY a JSON array with this exact structure (no markdown, no explanation)
   }}
 ]
  
-Rules:
-- type must be "checkbox" (multi-select) or "radio" (single-select)
-- Always include a question about duplicate rows if duplicates > 0
-- Always include questions about missing value handling for columns with missing data
-- Include outlier handling for numeric columns with outliers
-- Include date format standardization if date columns exist
-- Include text casing standardization if text columns exist
-- Make questions specific, mentioning actual column names and counts
-- options must always have at least 2 choices
-- option values must be simple lowercase keywords like: remove_duplicates, fill_mean, fill_median, fill_unknown, fill_mode, drop_rows, yyyy-mm-dd, dd/mm/yyyy, title_case, upper_case, lower_case, remove_outliers, cap_outliers, keep
+For text casing questions, options values must be exactly one of: title_case, upper_case, lower_case, keep
+For date questions, option values must be exactly one of: yyyy-mm-dd, dd/mm/yyyy, keep
+For missing value questions, option values must be exactly one of: fill_mean, fill_median, fill_mode, fill_unknown, fill_zero, drop_rows, keep
+For duplicate questions, option values must be exactly one of: remove_duplicates, keep
+For outlier questions, option values must be exactly one of: remove_outliers, cap_outliers, keep
 """
         text = generate_with_fallback(prompt)
         text = re.sub(r"```json|```", "", text).strip()
@@ -121,80 +127,91 @@ Return only the summary text, no markdown.
         )
  
  
-# ── Fallback Questions (no Gemini needed) ────────────────────────────────────
+# ── Fallback Questions ───────────────────────────────────────────────────────
 def get_fallback_questions(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
     questions = []
+    q_num = 1
  
+    # Duplicates
     if analysis["duplicate_rows"] > 0:
         questions.append({
-            "id": "q_dup",
-            "question": f"Found {analysis['duplicate_rows']} duplicate rows. What should we do?",
-            "type": "radio",
-            "column": None,
+            "id": f"q{q_num}", "question": f"Found {analysis['duplicate_rows']} duplicate rows. What should we do?",
+            "type": "radio", "column": None,
             "options": [
                 {"id": "o1", "label": "Remove all duplicates", "value": "remove_duplicates"},
                 {"id": "o2", "label": "Keep duplicates as-is", "value": "keep"},
             ]
         })
+        q_num += 1
  
-    has_missing_text = any(c["missing_count"] > 0 and c["type_category"] == "text" for c in analysis["columns"])
-    has_missing_numeric = any(c["missing_count"] > 0 and c["type_category"] == "numeric" for c in analysis["columns"])
+    # Missing values — per column
+    for col in analysis["columns"]:
+        if col["missing_count"] > 0:
+            if col["type_category"] == "numeric":
+                options = [
+                    {"id": "o1", "label": "Fill with mean", "value": "fill_mean"},
+                    {"id": "o2", "label": "Fill with median", "value": "fill_median"},
+                    {"id": "o3", "label": "Fill with 0", "value": "fill_zero"},
+                    {"id": "o4", "label": "Remove rows with missing values", "value": "drop_rows"},
+                ]
+            else:
+                options = [
+                    {"id": "o1", "label": "Fill with 'Unknown'", "value": "fill_unknown"},
+                    {"id": "o2", "label": "Fill with most frequent value", "value": "fill_mode"},
+                    {"id": "o3", "label": "Remove rows with missing values", "value": "drop_rows"},
+                    {"id": "o4", "label": "Keep as-is", "value": "keep"},
+                ]
+            questions.append({
+                "id": f"q{q_num}",
+                "question": f"Column '{col['name']}' has {col['missing_count']} missing values. How to handle?",
+                "type": "radio", "column": col["name"], "options": options
+            })
+            q_num += 1
  
-    if has_missing_numeric:
-        questions.append({
-            "id": "q_miss_numeric",
-            "question": "Some numeric columns have missing values. How should they be handled?",
-            "type": "radio",
-            "column": None,
-            "options": [
-                {"id": "o1", "label": "Fill with mean", "value": "fill_mean"},
-                {"id": "o2", "label": "Fill with median", "value": "fill_median"},
-                {"id": "o3", "label": "Fill with 0", "value": "fill_zero"},
-                {"id": "o4", "label": "Remove rows with missing values", "value": "drop_rows"},
-            ]
-        })
+    # Outliers — per numeric column
+    for col in analysis["columns"]:
+        if col.get("outlier_count", 0) > 0:
+            questions.append({
+                "id": f"q{q_num}",
+                "question": f"Column '{col['name']}' has {col['outlier_count']} outlier(s). How to handle?",
+                "type": "radio", "column": col["name"],
+                "options": [
+                    {"id": "o1", "label": "Cap outliers to IQR bounds", "value": "cap_outliers"},
+                    {"id": "o2", "label": "Remove rows with outliers", "value": "remove_outliers"},
+                    {"id": "o3", "label": "Keep outliers as-is", "value": "keep"},
+                ]
+            })
+            q_num += 1
  
-    if has_missing_text:
-        questions.append({
-            "id": "q_miss_text",
-            "question": "Some text columns have missing values. How should they be handled?",
-            "type": "radio",
-            "column": None,
-            "options": [
-                {"id": "o1", "label": "Fill with 'Unknown'", "value": "fill_unknown"},
-                {"id": "o2", "label": "Fill with most frequent value", "value": "fill_mode"},
-                {"id": "o3", "label": "Remove rows with missing values", "value": "drop_rows"},
-                {"id": "o4", "label": "Keep as-is", "value": "keep"},
-            ]
-        })
+    # Date format — per date column
+    for col in analysis["columns"]:
+        if col["type_category"] == "date":
+            questions.append({
+                "id": f"q{q_num}",
+                "question": f"Column '{col['name']}' has mixed date formats. Standardize to?",
+                "type": "radio", "column": col["name"],
+                "options": [
+                    {"id": "o1", "label": "YYYY-MM-DD (e.g., 2024-01-15)", "value": "yyyy-mm-dd"},
+                    {"id": "o2", "label": "DD/MM/YYYY (e.g., 15/01/2024)", "value": "dd/mm/yyyy"},
+                    {"id": "o3", "label": "Keep existing formats", "value": "keep"},
+                ]
+            })
+            q_num += 1
  
-    date_cols = [c for c in analysis["columns"] if c["type_category"] == "date"]
-    if date_cols:
-        questions.append({
-            "id": "q_date",
-            "question": f"Date columns detected ({', '.join(c['name'] for c in date_cols)}). Standardize format?",
-            "type": "radio",
-            "column": None,
-            "options": [
-                {"id": "o1", "label": "Standardize to YYYY-MM-DD", "value": "yyyy-mm-dd"},
-                {"id": "o2", "label": "Standardize to DD/MM/YYYY", "value": "dd/mm/yyyy"},
-                {"id": "o3", "label": "Keep existing formats", "value": "keep"},
-            ]
-        })
- 
-    text_cols = [c for c in analysis["columns"] if c["type_category"] == "text"]
-    if text_cols:
-        questions.append({
-            "id": "q_case",
-            "question": "Text columns may have inconsistent casing. How to standardize?",
-            "type": "radio",
-            "column": None,
-            "options": [
-                {"id": "o1", "label": "Title Case (e.g., Ahmed Khan)", "value": "title_case"},
-                {"id": "o2", "label": "UPPER CASE", "value": "upper_case"},
-                {"id": "o3", "label": "lower case", "value": "lower_case"},
-                {"id": "o4", "label": "Keep existing casing", "value": "keep"},
-            ]
-        })
+    # Text casing — per text column separately
+    for col in analysis["columns"]:
+        if col["type_category"] == "text":
+            questions.append({
+                "id": f"q{q_num}",
+                "question": f"Column '{col['name']}' has inconsistent casing (e.g., {', '.join(col['sample_values'][:2])}). Standardize to?",
+                "type": "radio", "column": col["name"],
+                "options": [
+                    {"id": "o1", "label": "Title Case (e.g., Ahmed Khan)", "value": "title_case"},
+                    {"id": "o2", "label": "UPPER CASE", "value": "upper_case"},
+                    {"id": "o3", "label": "lower case", "value": "lower_case"},
+                    {"id": "o4", "label": "Keep existing casing", "value": "keep"},
+                ]
+            })
+            q_num += 1
  
     return questions
